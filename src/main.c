@@ -4,6 +4,8 @@
 #include <stdlib.h>
 #include <curl/curl.h>
 
+#include "../json-parser/json.h"
+
 typedef enum {
   VINDINIUM_STATUS_OK = 0,
   VINDINIUM_STATUS_FAILURE,
@@ -11,6 +13,7 @@ typedef enum {
   VINDINIUM_STATUS_NULL_POINTER,
   VINDINIUM_STATUS_BAD_CONFIG,
   VINDINIUM_STATUS_BUFFER_TOO_SMALL,
+  VINDINIUM_STATUS_MALFORMED_REQUEST,
 } VindiniumStatus;
 
 typedef struct {
@@ -76,7 +79,7 @@ static size_t _header_callback(char *buffer, size_t size, size_t nitems, void *u
   memcpy(value_buffer, buffer + HEADER_NAME_LENGTH, buffer_size - HEADER_NAME_LENGTH);
   unsigned long const content_length = strtoul(value_buffer, NULL, 10);
   if (content_length == 0) {
-    LOG("Failed to convert string to number: %s.", value_buffer);
+    LOG("Failed to convert string to number: %s.\n", value_buffer);
     return 0;
   } else if (content_length > VINDINIUM_MAX_CONTENT_LENGTH) {
     LOG("Content-Length has value (%lu) greater than max (%o).\n", content_length,
@@ -107,7 +110,7 @@ static size_t _data_callback(char *buffer, size_t size, size_t nmemb, void *user
   VindiniumVector *vector = (VindiniumVector *) user_data;
   unsigned const needed_capacity = vector->size + buffer_size + 1;
   if (vector->capacity < needed_capacity) {
-    LOG("Vector's capacity (%u) too small. Resizing to %u.", vector->capacity, needed_capacity);
+    LOG("Vector's capacity (%u) too small. Resizing to %u.\n", vector->capacity, needed_capacity);
     void *new_data = realloc(vector->data, needed_capacity);
     if (new_data == NULL) {
       LOG("Call to realloc failed!\n");
@@ -117,7 +120,7 @@ static size_t _data_callback(char *buffer, size_t size, size_t nmemb, void *user
     vector->capacity = needed_capacity;
   }
 
-  LOG("Writing %u bytes of data.", buffer_size);
+  LOG("Writing %u bytes of data.\n", buffer_size);
   memcpy(vector->data + vector->size, buffer, buffer_size);
   ((char *) vector->data)[vector->size + buffer_size] = '\0';
   vector->size += buffer_size;
@@ -206,10 +209,39 @@ VindiniumStatus vindinium_create_training_session(VindiniumSession **aSession,
   curl_easy_setopt(curl_handle, CURLOPT_WRITEDATA, &vector);
 
   // Actually perform the request
-  CURLcode request_rc = curl_easy_perform(curl_handle);
-  if (request_rc != CURLE_OK) {
+  {
+    CURLcode rc = curl_easy_perform(curl_handle);
+    if (rc != CURLE_OK) {
+      LOG("Failed to make HTTP request.\n");
+      free(vector.data);
+      curl_easy_cleanup(curl_handle);
+      return VINDINIUM_STATUS_CURL_FAILURE;
+    }
+  }
+
+  long http_code = 0;
+  {
+    CURLcode rc = curl_easy_getinfo(curl_handle, CURLINFO_RESPONSE_CODE, &http_code);
+    if (rc != CURLE_OK || http_code == 0) {
+      LOG("Failed to get HTTP response code.\n");
+      free(vector.data);
+      curl_easy_cleanup(curl_handle);
+      return VINDINIUM_STATUS_CURL_FAILURE;
+    }
+  }
+
+  if (http_code != 200) {
+    LOG("Server returned status code %ld.\n", http_code);
+    free(vector.data);
     curl_easy_cleanup(curl_handle);
-    return VINDINIUM_STATUS_CURL_FAILURE;
+    return VINDINIUM_STATUS_MALFORMED_REQUEST;
+  }
+
+  json_value *root = json_parse(vector.data, vector.size);
+  if (root == NULL) {
+    LOG("Could not parse server response as JSON.\n");
+    free(vector.data);
+    curl_easy_cleanup(curl_handle);
   }
 
   return VINDINIUM_STATUS_OK;
@@ -225,7 +257,7 @@ int main(void) {
 
   VindiniumSession *session = NULL;
   VindiniumTrainingConfig config = {0};
-  config.key = "asdf";
+  config.key = "p2alvejh";
   VindiniumStatus status = vindinium_create_training_session(&session, &config);
   printf("\nStatus=%d\n", status);
 
