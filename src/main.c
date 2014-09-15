@@ -14,6 +14,7 @@ typedef enum {
   VINDINIUM_STATUS_BAD_CONFIG,
   VINDINIUM_STATUS_BUFFER_TOO_SMALL,
   VINDINIUM_STATUS_MALFORMED_REQUEST,
+  VINDINIUM_STATUS_MALFORMED_RESPONSE,
 } VindiniumStatus;
 
 typedef struct {
@@ -28,18 +29,32 @@ static unsigned const VINDINIUM_MAX_CONTENT_LENGTH = 65536;
 char const VINDINIUM_DEFAULT_TRAINING_ENDPOINT[] = "http://vindinium.org/api/training";
 
 typedef struct {
-  CURL *curl_handle;
-  char const *endpoint;
-  char const *key;
-  unsigned current_turn;
-  unsigned max_turns;
-} VindiniumSession;
-
-typedef struct {
   void *data;
   unsigned size;
   unsigned capacity;
 } VindiniumVector;
+
+typedef struct {
+  unsigned x;
+  unsigned y;
+} VindiniumPoint;
+
+typedef struct {
+  char *id;
+  unsigned turn;
+  unsigned max_turns;
+  char *view_url;
+  unsigned map_size;
+  char *map_tiles;
+} VindiniumGame;
+
+typedef struct {
+  CURL *curl_handle;
+  char const *endpoint;
+  char const *key;
+  char const *play_url;
+  VindiniumGame game;
+} VindiniumSession;
 
 #define LOG printf
 
@@ -126,6 +141,41 @@ static size_t _data_callback(char *buffer, size_t size, size_t nmemb, void *user
   vector->size += buffer_size;
 
   return buffer_size;
+}
+
+VindiniumStatus json_find_value(char const *search_string, json_value *root, json_value **value) {
+  json_value *cur_node = root;
+  char const *cur_name = search_string;
+  while (1) {
+    if (cur_node->type != json_object) {
+      return VINDINIUM_STATUS_FAILURE;
+    }
+
+    // Find the length of the current name (like a or b in a.b.c)
+    unsigned cur_name_length;
+    for (cur_name_length = 0;
+         cur_name[cur_name_length] != '.' && cur_name[cur_name_length] != '\0';
+         ++cur_name_length) {}
+
+    // Find the entry in the object with this name
+    unsigned i;
+    for (i = 0; i < cur_node->u.object.length; ++i) {
+      json_object_entry const *entry = &cur_node->u.object.values[i];
+      if (cur_name_length == entry->name_length &&
+          memcmp(cur_name, entry->name, entry->name_length) == 0) {
+        cur_node = entry->value;
+      }
+    }
+
+    if (cur_name[cur_name_length] == '\0') {
+      break;
+    } else {
+      cur_name += cur_name_length + 1;
+    }
+  }
+
+  *value = cur_node;
+  return VINDINIUM_STATUS_OK;
 }
 
 VindiniumStatus vindinium_create_training_session(VindiniumSession **aSession,
@@ -238,11 +288,23 @@ VindiniumStatus vindinium_create_training_session(VindiniumSession **aSession,
   }
 
   json_value *root = json_parse(vector.data, vector.size);
+  free(vector.data);
+  vector.data = NULL;
+  vector.size = vector.capacity = 0;
   if (root == NULL) {
     LOG("Could not parse server response as JSON.\n");
-    free(vector.data);
+    json_value_free(root);
     curl_easy_cleanup(curl_handle);
+    return VINDINIUM_STATUS_MALFORMED_RESPONSE;
+  } else if (root->type != json_object) {
+    LOG("Root is not a JSON object.\n");
+    json_value_free(root);
+    curl_easy_cleanup(curl_handle);
+    return VINDINIUM_STATUS_MALFORMED_RESPONSE;
   }
+  VindiniumSession *session = (*aSession) = calloc(1, sizeof(VindiniumSession));
+  json_value *bla = NULL;
+  VindiniumStatus status = find_value("game.id", root, &bla);
 
   return VINDINIUM_STATUS_OK;
 }
